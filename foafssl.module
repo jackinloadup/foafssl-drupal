@@ -1,3 +1,150 @@
 <?php
 // $Id$
 
+/**
+ * Implement hook_menu().
+ */
+function foafssl_menu() {
+  $items['admin/settings/foafssl'] = array(
+    'title' => 'FOAF+SSL',
+    'description' => 'Configure FOAF+SSL authentication.',
+    'page callback' => 'drupal_get_form',
+    'page arguments' => array('foafssl_admin_settings'),
+    'access arguments' => array('administer site configuration'),
+    'file' => 'foafssl.admin.inc',
+  );
+  $items['foaf-authentication'] = array(
+    'page callback' => 'foafssl_authentication_page',
+    'access callback' => TRUE,
+    'type' => MENU_CALLBACK,
+  );
+  return $items;
+}
+
+/**
+ * Authenticate the user using FOAF+SSL.
+ */
+function foafssl_authentication_page() {
+  $is_https = isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] == 'on';
+
+  if ($is_https) {
+    // HTTPS part of the authentication: authenticate the client,
+    // store the information and redirect back to HTTP.
+    require_once drupal_get_path('module', 'foafssl') . '/foafssl.inc';
+    $authentication = foaf_try_authentication();
+
+    $query = array();
+    if (isset($authentication['foaf_uri'])) {
+      $token = md5(uniqid('', TRUE));
+      // TODO: store that properly.
+      cache_set('foaf:' . $token, $authentication['foaf_uri'], 'cache', time() + 60);
+      $query = array(
+        'foaf-token' => $token,
+      );
+    }
+    elseif (isset($authentication['error'])) {
+      $query = array(
+        'foaf-error' => $authentication['error'],
+      );
+    }
+
+    drupal_goto('foaf-authentication', drupal_query_string_encode($query));
+  }
+  else {
+    // HTTP part of the authentication: use the token generated on the HTTPS
+    // side to authenticate the user.
+    if (isset($_GET['foaf-token'])) {
+      if ($cache = cache_get('foaf:' . $_GET['foaf-token'])) {
+        $identity = $cache->data;
+        $account = user_external_load($identity);
+        if (isset($account->uid)) {
+          if (!variable_get('user_email_verification', TRUE) || $account->login) {
+            drupal_set_message(t('Successfully authenticated with FOAF+SSL.'));
+            user_external_login($account);
+          }
+          else {
+            drupal_set_message(t('You must validate your email address for this account before logging in via WebId.'), 'warning');
+          }
+          drupal_goto();
+        }
+        else {
+          $_SESSION['foaf-identity'] = $identity;
+          drupal_set_message(t('You have now been identified by FOAF+SSL, you may now register on this website.'));
+          drupal_goto('user/register');
+        }
+      }
+      cache_del('foaf:' . $_GET['foaf-token']);
+    }
+    else {
+      drupal_set_message(t('Fail to authenticate with FOAF+SSL.'), 'error');
+      drupal_goto();
+    }
+  }
+}
+
+/**
+ * Implementation of hook_form_FORM_ID_alter().
+ */
+function foafssl_form_user_register_alter(&$form, &$form_state) {
+  $form['#submit'][] = 'foafssl_user_register_submit';
+}
+
+/**
+ * Submit callback for the user registration form.
+ */
+function foafssl_user_register_submit($form, &$form_state) {
+  if (isset($_SESSION['foaf-identity'])) {
+    db_query("INSERT INTO {authmap} (uid, authname, module) VALUES (%d, '%s','foafssl')", $form_state['user']->uid, $_SESSION['foaf-identity']);
+  }
+}
+
+/**
+ * Return the HTTPS base URL of this website.
+ */
+function foafssl_https_base_url() {
+  global $base_url;
+  return variable_get('foafssl_https_base_url', preg_replace('@^https?://@', 'https://', $base_url));
+}
+
+/**
+ * Build an URL to the HTTPS authentication page.
+ */
+function foafssl_build_https_url() {
+  global $base_url;
+  $old_base_url = $base_url;
+  $base_url = foafssl_https_base_url();
+  $value = url('foaf-authentication', array('absolute' => TRUE));
+
+  $base_url = $old_base_url;
+  return $value;
+}
+/**
+ * Implement hook_form_FORM_ID_alter().
+ */
+function foafssl_form_user_login_block_alter(&$form, &$form_state) {
+  _foafssl_user_login_form_alter($form, $form_state);
+}
+
+/**
+ * Implement hook_form_FORM_ID_alter().
+ */
+function foafssl_form_user_login_alter(&$form, &$form_state) {
+  _foafssl_user_login_form_alter($form, $form_state);
+}
+
+function _foafssl_user_login_form_alter(&$form, &$form_state) {
+  $items = array();
+  $items[] = array(
+    'data' => l(t('Log in using web-id'), foafssl_build_https_url()),
+    'class' => array('openid-link'),
+  );
+
+  $form['foafssl_links'] = array(
+    '#value' => theme('item_list', $items),
+  );
+
+  $form['links']['#weight'] = 0;
+  $form['submit']['#weight'] = 20;
+  $form['links']['#weight'] = 20;
+}
+

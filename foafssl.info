@@ -1,0 +1,5 @@
+; $Id$
+name = FOAF+SSL
+description = "Allow remote authentication using FOAF+SSL."
+version = VERSION
+core = 6.x
